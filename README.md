@@ -5,6 +5,8 @@ A single-file desktop editor for **Source engine** soundscape and soundscript `.
 Built with **PySide6**, with an optional fallback to **PyQt6**.  
 Audio preview uses **QtMultimedia** when available.
 
+<img width="1922" height="1415" alt="image" src="https://github.com/user-attachments/assets/f06382d3-93cd-444c-a11f-8ea96060ccbd" />
+
 ---
 
 ## Contents
