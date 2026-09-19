@@ -895,6 +895,4 @@ VLV["my_color"]
 
 ## License
 
-This repository does not currently include a license file.
-
-If you plan to publish the project publicly, add an explicit license before distribution.
+GNU General Public License
