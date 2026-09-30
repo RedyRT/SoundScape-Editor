@@ -7,6 +7,8 @@ import math
 import tempfile
 from copy import deepcopy
 
+from vpk_reader import SoundLibrary, VPKError, VPKDuplicate
+
 try:
     from PySide6.QtWidgets import *
     from PySide6.QtCore import *
@@ -96,6 +98,8 @@ LANGS = {
         "origin": "Origin (x,y,z):",
         "del_block": "Удалить", "del_rblock": "Удалить блок",
         "rnd_cap": "Список звуков (rndwave):", "add_wave": "+ Добавить звук в rndwave",
+        "to_rndwave": "→ Сделать rndwave (список звуков)",
+        "to_single_wave": "← Вернуть одиночный Wave",
         "file_type_scape": "[SOUNDSCAPE]", "file_type_script": "[SOUNDSCRIPT]",
         "ready": "Готов",
         "status_new": "Создан новый файл", "status_open": "Открыт",
@@ -135,6 +139,16 @@ LANGS = {
         "open_recent": "Открыть недавние",
         "clear_recent": "Очистить список",
         "no_recent": "(пусто)",
+        "settings": "Настройки", "tab_vpk": "VPK", "close": "Закрыть",
+        "mount_vpk": "Подключить VPK", "vpk_filter": "VPK (*.vpk)",
+        "vpk_desc": "Звуки из подключённых VPK доступны в браузере звуков и в предпрослушке. "
+                    "Файлы из папки sound/ на диске имеют приоритет.",
+        "vpk_desc2": "Выбирайте файл *_dir.vpk — остальные части (_000, _001…) подтянутся сами.",
+        "vpk_add": "+ Добавить...", "vpk_remove": "− Отключить", "vpk_remove_all": "Отключить все",
+        "vpk_drop": "Перетащите .vpk сюда\nили нажмите «+ Добавить...»",
+        "vpk_summary": "VPK: {n}   ·   звуков: {s}", "vpk_sounds": "{n} звуков",
+        "vpk_dup_title": "Уже подключено",
+        "vpk_dup_msg": "Эти файлы пропущены: VPK уже подключён (это тот же файл, его часть или копия):",
     },
     "en": {
         "file": "File", "lang": "Language", "history": "History",
@@ -161,6 +175,8 @@ LANGS = {
         "origin": "Origin (x,y,z):",
         "del_block": "Delete", "del_rblock": "Delete block",
         "rnd_cap": "Sound list (rndwave):", "add_wave": "+ Add sound to rndwave",
+        "to_rndwave": "→ Make rndwave (sound list)",
+        "to_single_wave": "← Switch back to single Wave",
         "file_type_scape": "[SOUNDSCAPE]", "file_type_script": "[SOUNDSCRIPT]",
         "ready": "Ready",
         "status_new": "New file created", "status_open": "Opened",
@@ -200,6 +216,16 @@ LANGS = {
         "open_recent": "Open Recent",
         "clear_recent": "Clear List",
         "no_recent": "(empty)",
+        "settings": "Settings", "tab_vpk": "VPK", "close": "Close",
+        "mount_vpk": "Mount VPK", "vpk_filter": "VPK (*.vpk)",
+        "vpk_desc": "Sounds from mounted VPKs are available in the sound browser and in previews. "
+                    "Loose files in the sound/ folder take priority.",
+        "vpk_desc2": "Pick the *_dir.vpk file — the other parts (_000, _001…) are picked up automatically.",
+        "vpk_add": "+ Add...", "vpk_remove": "− Unmount", "vpk_remove_all": "Unmount all",
+        "vpk_drop": "Drop .vpk files here\nor press \"+ Add...\"",
+        "vpk_summary": "VPKs: {n}   ·   sounds: {s}", "vpk_sounds": "{n} sounds",
+        "vpk_dup_title": "Already mounted",
+        "vpk_dup_msg": "These files were skipped: the VPK is already mounted (same file, one of its parts, or a copy):",
     },
 }
 
@@ -493,6 +519,7 @@ class SplashScreen(QSplashScreen):
                          "source engine // soundscape")
 
 class SoundBrowser(QDialog):
+    """Обзор звуков: папка sound/ на диске + подключённые VPK в одном дереве."""
     def __init__(self, parent, root_dir):
         super().__init__(parent)
         self.ed = parent
@@ -507,21 +534,25 @@ class SoundBrowser(QDialog):
         self.search = QLineEdit()
         top.addWidget(self.search, 1)
         v.addLayout(top)
-        hint = QLabel(root_dir)
+        srcs = ([root_dir] if root_dir else []) + \
+               [os.path.basename(p) for p in self.ed.sound_lib.paths()]
+        hint = QLabel("  |  ".join(srcs))
+        hint.setWordWrap(True)
         hint.setStyleSheet(f"color: {VLV['fg_dim']}; font-family: Consolas; font-size: 8pt;")
         v.addWidget(hint)
-        self.model = QFileSystemModel()
-        self.model.setRootPath(root_dir)
-        self.model.setNameFilters(["*.wav", "*.mp3", "*.ogg"])
-        self.model.setNameFilterDisables(False)
-        self.tree = QTreeView()
-        self.tree.setModel(self.model)
-        self.tree.setRootIndex(self.model.index(root_dir))
-        for c in (1, 2, 3):
-            self.tree.hideColumn(c)
-        self.tree.doubleClicked.connect(self._on_tree_double)
-        self.tree.selectionModel().selectionChanged.connect(
-            lambda *a: self.ed._refresh_preview_buttons())
+        self.sounds = self._collect()
+        self.tree = QTreeWidget()
+        self.tree.setColumnCount(1)
+        self.tree.setHeaderLabels(["Name"])
+        # прозрачная "иконка" 16 px в заголовке — так делает QFileSystemModel,
+        # из-за неё слово Name сдвинуто вправо, как в оригинальном браузере
+        _pm = QPixmap(16, 1)
+        _pm.fill(Qt.GlobalColor.transparent)
+        self.tree.headerItem().setIcon(0, QIcon(_pm))
+        self._init_icons()
+        self._build_tree()
+        self.tree.itemDoubleClicked.connect(self._on_tree_double)
+        self.tree.itemSelectionChanged.connect(self.ed._refresh_preview_buttons)
         v.addWidget(self.tree, 1)
         self.results = QListWidget()
         self.results.hide()
@@ -550,16 +581,88 @@ class SoundBrowser(QDialog):
         self.search.textChanged.connect(self._on_search)
         apply_dark_titlebar(self)
 
-    def rel(self, p):
-        return os.path.relpath(p, self.root_dir).replace("\\", "/")
+    def _collect(self):
+        """[(rel, источник)] — файлы на диске перекрывают одноимённые из VPK."""
+        seen, out = set(), []
+        if self.root_dir:
+            for dirpath, dirnames, filenames in os.walk(self.root_dir):
+                for f in filenames:
+                    if f.lower().endswith(AUDIO_EXTS):
+                        rel = os.path.relpath(os.path.join(dirpath, f),
+                                              self.root_dir).replace("\\", "/")
+                        seen.add(rel.lower())
+                        out.append((rel, ""))
+        for rel, label in self.ed.sound_lib.all_sounds():
+            if rel.lower() not in seen:
+                seen.add(rel.lower())
+                out.append((rel, label))
+        out.sort(key=lambda x: x[0].lower())
+        return out
+
+    def _init_icons(self):
+        """Системные иконки папки и файлов (как в QFileSystemModel)."""
+        prov = QFileIconProvider()
+        self._folder_icon = prov.icon(QFileIconProvider.IconType.Folder)
+        self._file_icons = {}
+        tmp = tempfile.mkdtemp(prefix="sse_icons_")
+        try:
+            for ext in AUDIO_EXTS:
+                p = os.path.join(tmp, "x" + ext)
+                try:
+                    open(p, "wb").close()
+                except OSError:
+                    continue
+                self._file_icons[ext] = prov.icon(QFileInfo(p))
+            self._default_file_icon = prov.icon(QFileIconProvider.IconType.File)
+        finally:
+            for f in os.listdir(tmp):
+                try:
+                    os.remove(os.path.join(tmp, f))
+                except OSError:
+                    pass
+            try:
+                os.rmdir(tmp)
+            except OSError:
+                pass
+
+    def _build_tree(self):
+        """Папки сначала, потом файлы; всё по алфавиту без учёта регистра."""
+        role = Qt.ItemDataRole.UserRole
+        root = {"dirs": {}, "files": []}
+        for rel, label in self.sounds:
+            parts = rel.split("/")
+            node = root
+            for part in parts[:-1]:
+                key = part.lower()
+                if key not in node["dirs"]:
+                    node["dirs"][key] = (part, {"dirs": {}, "files": []})
+                node = node["dirs"][key][1]
+            node["files"].append((parts[-1], rel, label))
+
+        def fill(parent, node):
+            for key in sorted(node["dirs"]):
+                name, child = node["dirs"][key]
+                it = QTreeWidgetItem(parent, [name])
+                it.setIcon(0, self._folder_icon)
+                fill(it, child)
+            for name, rel, label in sorted(node["files"], key=lambda x: x[0].lower()):
+                it = QTreeWidgetItem(parent, [name])
+                ext = os.path.splitext(name)[1].lower()
+                it.setIcon(0, self._file_icons.get(ext, self._default_file_icon))
+                it.setData(0, role, rel)
+                if label:
+                    it.setToolTip(0, label)
+
+        self.tree.setUpdatesEnabled(False)
+        fill(self.tree.invisibleRootItem(), root)
+        self.tree.setUpdatesEnabled(True)
 
     def _current_rel(self):
         if self.results.isVisible() and self.results.currentItem():
             return self.results.currentItem().text()
-        if self.tree.selectionModel().hasSelection():
-            p = self.model.filePath(self.tree.currentIndex())
-            if os.path.isfile(p):
-                return self.rel(p)
+        it = self.tree.currentItem()
+        if it is not None and self.tree.selectedItems():
+            return it.data(0, Qt.ItemDataRole.UserRole)
         return None
 
     def _preview_current(self):
@@ -578,21 +681,20 @@ class SoundBrowser(QDialog):
         self.results.show()
         self.results.clear()
         count = 0
-        for dirpath, dirnames, filenames in os.walk(self.root_dir):
-            for f in filenames:
-                if f.lower().endswith(AUDIO_EXTS):
-                    full = os.path.join(dirpath, f)
-                    rel = self.rel(full)
-                    if q in rel.lower():
-                        self.results.addItem(rel)
-                        count += 1
-                        if count >= 300:
-                            return
+        for rel, label in self.sounds:
+            if q in rel.lower():
+                item = QListWidgetItem(rel)
+                if label:
+                    item.setToolTip(label)
+                self.results.addItem(item)
+                count += 1
+                if count >= 300:
+                    return
 
-    def _on_tree_double(self, index):
-        p = self.model.filePath(index)
-        if os.path.isfile(p):
-            self.result_path = self.rel(p)
+    def _on_tree_double(self, item, col=0):
+        rel = item.data(0, Qt.ItemDataRole.UserRole)
+        if rel:
+            self.result_path = rel
             self.accept()
 
     def _on_result_double(self, item):
@@ -604,6 +706,212 @@ class SoundBrowser(QDialog):
         if rel:
             self.result_path = rel
             self.accept()
+
+
+class VpkRow(QWidget):
+    """Строка списка подключённых VPK: значок, имя, путь, число звуков."""
+    def __init__(self, vpk, count_text):
+        super().__init__()
+        self._path = vpk.path
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(12, 8, 14, 8)
+        lay.setSpacing(12)
+        self.badge = QLabel("VPK")
+        self.badge.setFixedSize(40, 30)
+        self.badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        lay.addWidget(self.badge)
+        col = QVBoxLayout()
+        col.setSpacing(1)
+        self.name = QLabel(os.path.basename(vpk.path))
+        self.path = QLabel(vpk.path)
+        self.path.setMinimumWidth(0)
+        self.path.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        col.addWidget(self.name)
+        col.addWidget(self.path)
+        lay.addLayout(col, 1)
+        self.count = QLabel(count_text)
+        self.count.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        lay.addWidget(self.count)
+        self.setToolTip(vpk.path)
+        self.set_selected(False)
+
+    def set_selected(self, sel):
+        fg = VLV["black"] if sel else VLV["fg"]
+        dim = "#3d2a0c" if sel else VLV["fg_dim"]
+        acc = VLV["black"] if sel else VLV["accent"]
+        bb = VLV["black"] if sel else VLV["accent"]
+        self.setStyleSheet("QLabel { background: transparent; }")
+        self.badge.setStyleSheet(
+            f"background: transparent; color: {acc}; border: 1px solid {bb}; "
+            "font-family: Consolas; font-size: 8pt; font-weight: bold;")
+        self.name.setStyleSheet(f"color: {fg}; font-weight: bold; font-size: 10pt;")
+        self.path.setStyleSheet(f"color: {dim}; font-family: Consolas; font-size: 8pt;")
+        self.count.setStyleSheet(f"color: {acc}; font-family: Consolas; font-size: 9pt; font-weight: bold;")
+
+    def resizeEvent(self, e):
+        super().resizeEvent(e)
+        fm = QFontMetrics(self.path.font())
+        self.path.setText(fm.elidedText(self._path, Qt.TextElideMode.ElideMiddle,
+                                        max(60, self.path.width())))
+
+
+class SettingsDialog(QDialog):
+    """Окно настроек. Сейчас одна вкладка — VPK (подключение / отключение)."""
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.ed = parent
+        self.setWindowTitle(self.ed.t("settings"))
+        self.resize(700, 520)
+        self.setMinimumSize(560, 420)
+        self.setAcceptDrops(True)
+        v = QVBoxLayout(self)
+        tabs = QTabWidget()
+        tabs.addTab(self._build_vpk_tab(), self.ed.t("tab_vpk"))
+        v.addWidget(tabs, 1)
+        bot = QHBoxLayout()
+        bot.addStretch(1)
+        close = QPushButton(self.ed.t("close"))
+        close.setMinimumWidth(96)
+        close.clicked.connect(self.accept)
+        bot.addWidget(close)
+        v.addLayout(bot)
+        self._reload()
+        apply_dark_titlebar(self)
+
+    # ---------- вкладка VPK ----------
+    def _build_vpk_tab(self):
+        page = QWidget()
+        v = QVBoxLayout(page)
+        v.setContentsMargins(14, 14, 14, 12)
+        v.setSpacing(8)
+        desc = QLabel(self.ed.t("vpk_desc"))
+        desc.setWordWrap(True)
+        v.addWidget(desc)
+        desc2 = QLabel(self.ed.t("vpk_desc2"))
+        desc2.setWordWrap(True)
+        desc2.setStyleSheet(f"color: {VLV['fg_dim']}; font-family: Consolas; font-size: 8pt;")
+        v.addWidget(desc2)
+
+        self.stack = QStackedWidget()
+        empty = QLabel(self.ed.t("vpk_drop"))
+        empty.setObjectName("vpkEmpty")
+        empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        empty.setStyleSheet(
+            f"QLabel#vpkEmpty {{ color: {VLV['fg_dim']}; background: {VLV['bg']}; "
+            f"border: 2px dashed {VLV['border']}; font-size: 11pt; }}")
+        self.stack.addWidget(empty)
+        self.list = QListWidget()
+        self.list.setObjectName("vpkList")
+        self.list.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        self.list.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
+        self.list.setStyleSheet(
+            f"QListWidget#vpkList {{ background: {VLV['bg']}; }}"
+            f"QListWidget#vpkList::item {{ padding: 0; border-bottom: 1px solid {VLV['border']}; }}"
+            f"QListWidget#vpkList::item:hover {{ background: #2b2e31; }}"
+            f"QListWidget#vpkList::item:selected {{ background: {VLV['accent']}; }}")
+        self.list.itemSelectionChanged.connect(self._on_selection)
+        self.stack.addWidget(self.list)
+        v.addWidget(self.stack, 1)
+
+        row = QHBoxLayout()
+        self.add_btn = QPushButton(self.ed.t("vpk_add"))
+        self.add_btn.setStyleSheet(
+            f"QPushButton {{ background: {VLV['accent']}; color: {VLV['black']}; "
+            f"border: 1px solid {VLV['accent']}; font-weight: bold; padding: 5px 16px; }}"
+            f"QPushButton:hover {{ background: {VLV['accent_hi']}; }}"
+            f"QPushButton:pressed {{ background: {VLV['accent_lo']}; }}")
+        self.add_btn.clicked.connect(self._add)
+        self.rm_btn = QPushButton(self.ed.t("vpk_remove"))
+        self.rm_btn.clicked.connect(self._remove_selected)
+        self.rm_all_btn = QPushButton(self.ed.t("vpk_remove_all"))
+        self.rm_all_btn.clicked.connect(self._remove_all)
+        self.summary = QLabel()
+        self.summary.setStyleSheet(f"color: {VLV['fg_dim']}; font-family: Consolas; font-size: 8pt;")
+        row.addWidget(self.add_btn)
+        row.addWidget(self.rm_btn)
+        row.addWidget(self.rm_all_btn)
+        row.addStretch(1)
+        row.addWidget(self.summary)
+        v.addLayout(row)
+        return page
+
+    def _reload(self):
+        self.list.clear()
+        lib = self.ed.sound_lib
+        total = 0
+        for vpk in lib.vpks:
+            n = vpk.sound_count()
+            total += n
+            row = VpkRow(vpk, self.ed.t("vpk_sounds", n=f"{n:,}".replace(",", " ")))
+            item = QListWidgetItem(self.list)
+            item.setData(Qt.ItemDataRole.UserRole, vpk.path)
+            item.setSizeHint(QSize(0, max(54, row.sizeHint().height())))
+            self.list.setItemWidget(item, row)
+        self.stack.setCurrentIndex(1 if lib.vpks else 0)
+        self.summary.setText(self.ed.t("vpk_summary", n=len(lib.vpks),
+                                       s=f"{total:,}".replace(",", " ")) if lib.vpks else "")
+        self.rm_all_btn.setEnabled(bool(lib.vpks))
+        self._on_selection()
+
+    def _on_selection(self):
+        sel = self.list.selectedItems()
+        self.rm_btn.setEnabled(bool(sel))
+        for i in range(self.list.count()):
+            it = self.list.item(i)
+            w = self.list.itemWidget(it)
+            if w is not None:
+                w.set_selected(it.isSelected())
+
+    # ---------- действия ----------
+    def _start_dir(self):
+        paths = self.ed.sound_lib.paths()
+        if paths:
+            return os.path.dirname(paths[-1])
+        return self.ed.last_dir or ""
+
+    def _add(self):
+        files, _ = QFileDialog.getOpenFileNames(
+            self, self.ed.t("mount_vpk"), self._start_dir(), self.ed.t("vpk_filter"))
+        if files:
+            self.ed.mount_vpk_paths(files, self)
+            self._reload()
+
+    def _remove_selected(self):
+        paths = [it.data(Qt.ItemDataRole.UserRole) for it in self.list.selectedItems()]
+        for p in paths:
+            self.ed.unmount_vpk(p)
+        self._reload()
+
+    def _remove_all(self):
+        self.ed.unmount_all_vpk()
+        self._reload()
+
+    def keyPressEvent(self, e):
+        if e.key() == Qt.Key.Key_Delete and self.list.selectedItems():
+            self._remove_selected()
+            return
+        super().keyPressEvent(e)
+
+    # ---------- drag & drop ----------
+    @staticmethod
+    def _vpk_urls(md):
+        return [u.toLocalFile() for u in md.urls()
+                if u.isLocalFile() and u.toLocalFile().lower().endswith(".vpk")]
+
+    def dragEnterEvent(self, e):
+        if self._vpk_urls(e.mimeData()):
+            e.acceptProposedAction()
+        else:
+            super().dragEnterEvent(e)
+
+    def dropEvent(self, e):
+        files = self._vpk_urls(e.mimeData())
+        if files:
+            e.acceptProposedAction()
+            self.ed.mount_vpk_paths(files, self)
+            self._reload()
+
 
 class SoundscapeEditor(QMainWindow):
     def __init__(self):
@@ -646,6 +954,17 @@ class SoundscapeEditor(QMainWindow):
         self.recent_files = settings.get("recent_files", [])
         if not isinstance(self.recent_files, list):
             self.recent_files = []
+
+        try:
+            SoundLibrary.sweep_stale()
+        except Exception:
+            pass
+        self.sound_lib = SoundLibrary()
+        for p in settings.get("vpk_files", []):
+            try:
+                self.sound_lib.mount(p)
+            except (VPKError, OSError):
+                pass
 
         if not os.path.isfile(self.settings_path()):
             self.save_settings()
@@ -725,6 +1044,8 @@ class SoundscapeEditor(QMainWindow):
         if full is None and os.path.isfile(rel_path):
             full = rel_path
         if full is None:
+            full = self.sound_lib.extract(rel_path)
+        if full is None:
             return
         if self._last_preview == full and \
                 self.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
@@ -790,8 +1111,11 @@ class SoundscapeEditor(QMainWindow):
             w = w[1:]
         if not w:
             return None
-        full = os.path.join(root, w.replace("/", os.sep))
-        return full if os.path.isfile(full) else None
+        if root:
+            full = os.path.join(root, w.replace("/", os.sep))
+            if os.path.isfile(full):
+                return full
+        return self.sound_lib.extract(w)
 
     def _make_preview_player(self, root, block, looping):
         wave = str(block.get("wave", "")).strip()
@@ -827,7 +1151,7 @@ class SoundscapeEditor(QMainWindow):
             self.prev_label.setText(self.t("prev_script_na"))
             return
         root = self.get_sound_root()
-        if not root:
+        if not root and not self.sound_lib.vpks:
             self.prev_label.setText(self.t("prev_noroot"))
             return
         sc = self.data[self.current_sc]
@@ -909,6 +1233,7 @@ class SoundscapeEditor(QMainWindow):
         for pl in self._preview_players + self._preview_oneshots:
             try:
                 pl.stop()
+                pl.setSource(QUrl())      # отпустить файл, чтобы его можно было удалить
                 pl.deleteLater()
             except Exception:
                 pass
@@ -978,7 +1303,9 @@ class SoundscapeEditor(QMainWindow):
             event.ignore()
             return
         self.preview_stop()
+        self._release_main_player()
         self.save_settings()
+        self.sound_lib.cleanup()
         event.accept()
 
     @staticmethod
@@ -1054,7 +1381,10 @@ class SoundscapeEditor(QMainWindow):
                 if urls:
                     p = urls[0].toLocalFile()
                     if p.lower().endswith(AUDIO_EXTS):
-                        obj.setText(self._rel_for_drop(p))
+                        new_text = self._rel_for_drop(p)
+                        if obj.text() != new_text and not self._restoring:
+                            self._push_history()
+                        obj.setText(new_text)
                         event.acceptProposedAction()
                         return True
                 return False
@@ -1512,7 +1842,8 @@ class SoundscapeEditor(QMainWindow):
             with open(self.settings_path(), "w", encoding="utf-8") as f:
                 json.dump({"lang": self.lang, "last_dir": self.last_dir,
                            "master_volume": self.master_volume,
-                           "recent_files": self.recent_files}, f)
+                           "recent_files": self.recent_files,
+                           "vpk_files": self.sound_lib.paths() if hasattr(self, "sound_lib") else []}, f)
         except Exception:
             pass
 
@@ -1687,6 +2018,12 @@ class SoundscapeEditor(QMainWindow):
         if self.history_dock is not None:
             self.hist_btn.setChecked(self.history_dock.isVisible())
         h.addWidget(self.hist_btn)
+        
+        settings_btn = QToolButton()
+        settings_btn.setText(self.t("settings"))
+        settings_btn.clicked.connect(self.open_settings)
+        h.addWidget(settings_btn)
+        
         self.lang_menu = QMenu(self)
         for code, label in (("ru", "Русский"), ("en", "English")):
             act = self.lang_menu.addAction(label)
@@ -1715,6 +2052,7 @@ class SoundscapeEditor(QMainWindow):
         file_btn.setPopupMode(QToolButton.InstantPopup)
         file_btn.setMenu(self.file_menu)
         h.addWidget(file_btn)
+
         root_lay.addWidget(header)
         sep = QFrame()
         sep.setFixedHeight(2)
@@ -2288,16 +2626,65 @@ class SoundscapeEditor(QMainWindow):
                 return cand
         return None
 
-    def stop_browser_preview(self):
+    def open_settings(self):
+        dlg = SettingsDialog(self)
+        dlg.exec()
+
+    def mount_vpk_paths(self, paths, parent=None):
+        """Подключает VPK, показывает ошибки и пропущенные дубликаты. Возвращает число подключённых."""
+        before = {os.path.normcase(v.path) for v in self.sound_lib.vpks}
+        added = 0
+        dups = []
+        for p in paths:
+            try:
+                self.sound_lib.mount(p)
+                added += 1
+            except VPKDuplicate as e:
+                # части одного набора, выбранные вместе (_dir + _000 + ...), не считаем ошибкой
+                if os.path.normcase(e.existing.path) in before:
+                    dups.append(f"\u2022 {os.path.basename(p)}  \u2192  {e.existing.path}")
+            except (VPKError, OSError) as e:
+                QMessageBox.warning(parent or self, self.t("error_t"),
+                                    f"{os.path.basename(p)}:\n{e}")
+        if added:
+            self.save_settings()
+        if dups:
+            QMessageBox.information(parent or self, self.t("vpk_dup_title"),
+                                    self.t("vpk_dup_msg") + "\n\n" + "\n".join(dups))
+        return added
+
+    def unmount_vpk(self, path):
+        self.preview_stop()
+        self.stop_browser_preview()
+        self.sound_lib.unmount(path)
+        self.save_settings()
+        QTimer.singleShot(1500, self.sound_lib.flush_pending)
+
+    def unmount_all_vpk(self):
+        self.preview_stop()
+        self.stop_browser_preview()
+        self.sound_lib.clear()
+        self.save_settings()
+        QTimer.singleShot(1500, self.sound_lib.flush_pending)
+
+    def _release_main_player(self):
+        """Останавливает основной плеер и отпускает файл (нужно перед удалением temp-файлов)."""
         if self.player is not None:
-            self.player.stop()
+            try:
+                self.player.stop()
+                self.player.setSource(QUrl())
+            except Exception:
+                pass
+
+    def stop_browser_preview(self):
+        self._release_main_player()
         self._last_preview = None
         self._last_preview_rel = None
         self._refresh_preview_buttons()
 
     def browse_sound(self, line_edit):
         root_dir = self.get_sound_root()
-        if not root_dir:
+        if not root_dir and not self.sound_lib.vpks:
             QMessageBox.warning(self, self.t("no_sound_dir_t"), self.t("no_sound_dir"))
             return
         dlg = SoundBrowser(self, root_dir)
@@ -2305,6 +2692,9 @@ class SoundscapeEditor(QMainWindow):
         if getattr(dlg, "_preview_started", False):
             self.stop_browser_preview()
         if accepted:
+            # снимок ДО замены: кнопка "..." не даёт фокус полю, поэтому FocusIn-снимок не делается
+            if line_edit.text() != dlg.result_path:
+                self._push_history()
             line_edit.setText(dlg.result_path)
         self._refresh_preview_buttons()
         dlg.deleteLater()
@@ -2466,6 +2856,9 @@ class SoundscapeEditor(QMainWindow):
         lay.addWidget(rand_group)
         lay.addStretch(1)
 
+    def _sc_has_rndwave(self, sc):
+        return isinstance(sc.get("rndwave"), dict)
+
     def _build_soundscript_tab(self):
         lay = self.script_layout
         self._clear_layout(lay)
@@ -2473,24 +2866,118 @@ class SoundscapeEditor(QMainWindow):
             lay.addWidget(self._placeholder())
             return
         sc = self.data[self.current_sc]
+        is_rnd = self._sc_has_rndwave(sc)
         grid = QGridLayout()
-        grid.addWidget(QLabel(self.t("name_ss_lbl")), 0, 0)
+        row = 0
+        grid.addWidget(QLabel(self.t("name_ss_lbl")), row, 0)
         name_le = QLineEdit(self.current_sc)
         name_le.installEventFilter(self)
         name_le.setAcceptDrops(False)
         name_le.textChanged.connect(self._on_rename)
-        grid.addWidget(name_le, 0, 1)
-        self._make_combo(grid, 1, 0, 1, self.t("channel"), sc, "channel", self._combo_items_channel())
-        self._make_entry(grid, 2, 0, 1, self.t("wave"), sc, "wave", browse=True)
-        self._make_spin(grid, 3, 0, 1, self.t("volume"), sc, "volume",
+        grid.addWidget(name_le, row, 1)
+        row += 1
+        self._make_combo(grid, row, 0, 1, self.t("channel"), sc, "channel", self._combo_items_channel())
+        row += 1
+        if not is_rnd:
+            self._make_entry(grid, row, 0, 1, self.t("wave"), sc, "wave", browse=True)
+            row += 1
+        toggle_btn = QPushButton(self.t("to_single_wave") if is_rnd else self.t("to_rndwave"))
+        toggle_btn.clicked.connect(self.toggle_soundscript_rndwave)
+        grid.addWidget(toggle_btn, row, 1)
+        row += 1
+        self._make_spin(grid, row, 0, 1, self.t("volume"), sc, "volume",
                         0, 10, step=0.05, dec=2, pair=True, d1=1, d2=1)
-        self._make_spin(grid, 4, 0, 1, self.t("pitch"), sc, "pitch",
+        row += 1
+        self._make_spin(grid, row, 0, 1, self.t("pitch"), sc, "pitch",
                         1, 255, step=1, dec=None, pair=True, d1=100, d2=100)
-        self._make_combo(grid, 5, 0, 1, self.t("soundlevel"), sc, "soundlevel",
+        row += 1
+        self._make_combo(grid, row, 0, 1, self.t("soundlevel"), sc, "soundlevel",
                          self._combo_items_sndlvl())
         grid.setColumnStretch(1, 1)
         lay.addLayout(grid)
+        if is_rnd:
+            lay.addWidget(self._make_soundscript_rndwave_box(sc))
         lay.addStretch(1)
+
+    def _make_soundscript_rndwave_box(self, sc):
+        box = QGroupBox(self.t("rnd_cap"))
+        v = QVBoxLayout(box)
+        waves = self._ensure_rndwave(sc)
+        for w_idx, w_val in enumerate(waves):
+            row_w = QHBoxLayout()
+            row_w.addWidget(QLabel("Wave:"))
+            le = QLineEdit(str(w_val))
+            le.installEventFilter(self)
+            le.setProperty("wave_edit", True)
+            le.setAcceptDrops(True)
+            le.textChanged.connect(lambda t, wi=w_idx: self._set_soundscript_wave(wi, t))
+            row_w.addWidget(le, 1)
+            bb = QPushButton("...")
+            bb.setFixedWidth(32)
+            bb.clicked.connect(lambda _=False, le=le: self.browse_sound(le))
+            row_w.addWidget(bb)
+            pv = QPushButton("▶")
+            pv.setFixedWidth(32)
+            pv.setToolTip(self.t("preview_tip"))
+            pv.clicked.connect(lambda _=False, le=le: self.preview_sound(le.text()))
+            self._register_preview_button(pv, lambda le=le: le.text())
+            row_w.addWidget(pv)
+            bx = QPushButton("X")
+            bx.setFixedWidth(32)
+            bx.clicked.connect(lambda _=False, wi=w_idx: self.remove_wave_from_soundscript_rndwave(wi))
+            row_w.addWidget(bx)
+            v.addLayout(row_w)
+        hw = QHBoxLayout()
+        addw = QPushButton(self.t("add_wave"))
+        addw.clicked.connect(self.add_wave_to_soundscript_rndwave)
+        hw.addWidget(addw)
+        hw.addStretch(1)
+        v.addLayout(hw)
+        return box
+
+    def toggle_soundscript_rndwave(self):
+        if self.current_sc is None:
+            return
+        self._push_history()
+        sc = self.data[self.current_sc]
+        if self._sc_has_rndwave(sc):
+            waves = self._ensure_rndwave(sc)
+            first = next((w for w in waves if w), "")
+            sc.pop("rndwave", None)
+            sc["wave"] = first
+        else:
+            current_wave = str(sc.get("wave", "")).strip()
+            sc.pop("wave", None)
+            sc["rndwave"] = {"wave": [current_wave] if current_wave else [""]}
+        self._mark_dirty()
+        self.build_right_panel()
+
+    def add_wave_to_soundscript_rndwave(self):
+        if self.current_sc is None:
+            return
+        self._push_history()
+        sc = self.data[self.current_sc]
+        self._ensure_rndwave(sc).append("")
+        self.build_right_panel()
+
+    def remove_wave_from_soundscript_rndwave(self, w_idx):
+        if self.current_sc is None:
+            return
+        self._push_history()
+        sc = self.data[self.current_sc]
+        waves = self._ensure_rndwave(sc)
+        if 0 <= w_idx < len(waves):
+            waves.pop(w_idx)
+        self.build_right_panel()
+
+    def _set_soundscript_wave(self, w_idx, text):
+        if self.current_sc is None:
+            return
+        sc = self.data[self.current_sc]
+        waves = self._ensure_rndwave(sc)
+        if 0 <= w_idx < len(waves):
+            waves[w_idx] = text
+            self._mark_dirty()
 
     def _make_loop_block(self, idx, block):
         g = QGroupBox(f"Loop #{idx + 1}")
