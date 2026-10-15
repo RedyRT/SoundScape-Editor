@@ -217,7 +217,7 @@ class SoundLibrary:
 
     def _vpk_dir(self, vpk_path):
         tag = hashlib.md5(os.path.normcase(vpk_path).encode("utf-8")).hexdigest()[:10]
-        return os.path.join(self._tmp, tag)
+        return os.path.join(self._session_dir(), tag)
 
     def _remove_dir(self, d):
         """Удаляет папку. Если что-то занято — запоминает и пробует позже (flush_pending)."""

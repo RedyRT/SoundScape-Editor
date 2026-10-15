@@ -9,23 +9,31 @@ from copy import deepcopy
 
 from vpk_reader import SoundLibrary, VPKError, VPKDuplicate
 
-try:
-    from PySide6.QtWidgets import *
-    from PySide6.QtCore import *
-    from PySide6.QtGui import *
-except ImportError:
-    from PyQt6.QtWidgets import *
-    from PyQt6.QtCore import *
-    from PyQt6.QtGui import *
+from PySide6.QtCore import (
+    QEvent, QFileInfo, QItemSelectionModel, QPointF, QRect, QRectF, QSize,
+    QTimer, QUrl, Qt,
+)
+from PySide6.QtGui import (
+    QBrush, QColor, QCursor, QFont, QFontMetrics, QGuiApplication, QIcon,
+    QImage, QKeySequence, QLinearGradient, QPainter, QPainterPath, QPen,
+    QPixmap, QPolygonF, QShortcut,
+)
+from PySide6.QtWidgets import (
+    QAbstractItemView, QAbstractSpinBox, QApplication, QComboBox, QDialog,
+    QDockWidget, QDoubleSpinBox, QFileDialog, QFileIconProvider,
+    QFileSystemModel, QFrame, QGridLayout, QGroupBox, QHBoxLayout, QHeaderView,
+    QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMenu,
+    QMessageBox, QPushButton, QScrollArea, QScrollBar, QSizeGrip, QSizePolicy,
+    QSlider, QSpinBox, QSplashScreen, QSplitter, QStackedWidget, QStatusBar,
+    QTabBar, QTabWidget, QToolButton, QTreeView, QTreeWidget, QTreeWidgetItem,
+    QVBoxLayout, QWidget,
+)
 
 try:
     from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput
 except ImportError:
-    try:
-        from PyQt6.QtMultimedia import QMediaPlayer, QAudioOutput
-    except ImportError:
-        QMediaPlayer = None
-        QAudioOutput = None
+    QMediaPlayer = None
+    QAudioOutput = None
 
 VLV = {
     "bg": "#1b1d1f", "panel": "#26282b", "field": "#333639",
@@ -860,7 +868,7 @@ class SettingsDialog(QDialog):
         for i in range(self.list.count()):
             it = self.list.item(i)
             w = self.list.itemWidget(it)
-            if w is not None:
+            if isinstance(w, VpkRow):
                 w.set_selected(it.isSelected())
 
     # ---------- действия ----------
@@ -1002,6 +1010,10 @@ class SoundscapeEditor(QMainWindow):
         return self.file_type == "soundscript"
 
     def _init_player(self):
+        if QMediaPlayer is None or QAudioOutput is None:
+            self.player = None
+            self.audio_out = None
+            return
         try:
             self.player = QMediaPlayer()
             self.audio_out = QAudioOutput()
@@ -1033,7 +1045,7 @@ class SoundscapeEditor(QMainWindow):
             self.save_settings()
 
     def preview_sound(self, rel_path):
-        if self.player is None or not rel_path:
+        if self.player is None or QMediaPlayer is None or not rel_path:
             return
         root_dir = self.get_sound_root()
         full = None
@@ -1065,7 +1077,7 @@ class SoundscapeEditor(QMainWindow):
         self._preview_buttons.append({"btn": btn, "provider": provider})
 
     def _refresh_preview_buttons(self):
-        if self.player is None:
+        if self.player is None or QMediaPlayer is None:
             return
         playing = self.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState
         cur_rel = self._last_preview_rel if playing else None
@@ -1118,6 +1130,8 @@ class SoundscapeEditor(QMainWindow):
         return self.sound_lib.extract(w)
 
     def _make_preview_player(self, root, block, looping):
+        if QMediaPlayer is None or QAudioOutput is None:
+            return None
         wave = str(block.get("wave", "")).strip()
         if not wave:
             return None
@@ -1179,6 +1193,10 @@ class SoundscapeEditor(QMainWindow):
         self._sync_preview_ui()
 
     def _start_random_preview(self, block, root):
+        media_player = QMediaPlayer
+        audio_output = QAudioOutput
+        if media_player is None or audio_output is None:
+            return
         timer = QTimer(self)
         timer.setSingleShot(True)
         def fire():
@@ -1190,8 +1208,8 @@ class SoundscapeEditor(QMainWindow):
                 if waves:
                     full = self._resolve_wave(root, random.choice(waves))
                     if full:
-                        pl = QMediaPlayer(self)
-                        ao = QAudioOutput(self)
+                        pl = media_player(self)
+                        ao = audio_output(self)
                         pl.setAudioOutput(ao)
                         vmin, vmax = self._parse_pair(block.get("volume"), 1.0, 1.0)
                         base_vol = random.uniform(vmin, vmax)
@@ -1216,7 +1234,7 @@ class SoundscapeEditor(QMainWindow):
         timer.start(int(random.uniform(tmin, tmax) * 1000))
 
     def _oneshot_finished(self, status, pl, ao=None):
-        if status == QMediaPlayer.MediaStatus.EndOfMedia:
+        if QMediaPlayer is not None and status == QMediaPlayer.MediaStatus.EndOfMedia:
             pl.stop()
             pl.deleteLater()
             if pl in self._preview_oneshots:
@@ -1641,8 +1659,9 @@ class SoundscapeEditor(QMainWindow):
         self._hist_float_btn.setToolTip(self.t("float_tip"))
         self._hist_float_btn.setIcon(self._ui_icon("float_icon"))
         self._hist_float_btn.setIconSize(QSize(12, 12))
+        history_dock = QDockWidget(self)
         self._hist_float_btn.clicked.connect(
-            lambda: self.history_dock.setFloating(not self.history_dock.isFloating()))
+            lambda: history_dock.setFloating(not history_dock.isFloating()))
         self._hist_close_btn = QPushButton("")
         self._hist_close_btn.setObjectName("histCloseBtn")
         self._hist_close_btn.setFixedSize(46, 32)
@@ -1650,14 +1669,14 @@ class SoundscapeEditor(QMainWindow):
         self._hist_close_btn.setToolTip(self.t("close_tip"))
         self._hist_close_btn.setIcon(self._ui_icon("close_x"))
         self._hist_close_btn.setIconSize(QSize(12, 12))
-        self._hist_close_btn.clicked.connect(lambda: self.history_dock.hide())
+        self._hist_close_btn.clicked.connect(history_dock.hide)
         tl.addWidget(self._hist_title_lbl)
         tl.addWidget(self._hist_count_lbl)
         tl.addStretch(1)
         tl.addWidget(self._hist_hint_lbl)
         tl.addWidget(self._hist_float_btn)
         tl.addWidget(self._hist_close_btn)
-        self.history_dock = QDockWidget(self)
+        self.history_dock = history_dock
         self.history_dock.setObjectName("historyDock")
         self.history_dock.setWindowTitle(self.t("history"))
         self.history_dock.setTitleBarWidget(tb)
@@ -1819,8 +1838,10 @@ class SoundscapeEditor(QMainWindow):
             self.listbox.setCurrentRow(rows.index(name))
         self.set_status(f"{self.t('status_paste')}: {name}")
 
-    def t(self, key, **kw):
+    def t(self, key: str, **kw: object) -> str:
         s = LANGS[self.lang].get(key, LANGS["ru"].get(key, key))
+        if s is None:
+            s = key
         return s.format(**kw) if kw else s
 
     def settings_path(self):
@@ -1955,7 +1976,7 @@ class SoundscapeEditor(QMainWindow):
             cx = min(max(x, x0 + r), x1 - r)
             cy = min(max(y, y0 + r), y1 - r)
             return (x - cx) ** 2 + (y - cy) ** 2 <= r * r
-        grid = [[TRANSPARENT] * W for _ in range(H)]
+        grid: list[list[tuple[int, int, int, int]]] = [[TRANSPARENT] * W for _ in range(H)]
         for y in range(H):
             for x in range(W):
                 if in_rounded(x, y, 0, 0, W - 1, H - 1, 6):
@@ -2032,7 +2053,7 @@ class SoundscapeEditor(QMainWindow):
             act.triggered.connect(lambda _=False, c=code: self.apply_language(c))
         lang_btn = QToolButton()
         lang_btn.setText(self.t("lang"))
-        lang_btn.setPopupMode(QToolButton.InstantPopup)
+        lang_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
         lang_btn.setMenu(self.lang_menu)
         h.addWidget(lang_btn)
         
@@ -2049,7 +2070,7 @@ class SoundscapeEditor(QMainWindow):
         
         file_btn = QToolButton()
         file_btn.setText(self.t("file"))
-        file_btn.setPopupMode(QToolButton.InstantPopup)
+        file_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
         file_btn.setMenu(self.file_menu)
         h.addWidget(file_btn)
 
@@ -2106,11 +2127,16 @@ class SoundscapeEditor(QMainWindow):
         self.listbox = QListWidget()
         self.listbox.currentRowChanged.connect(self._on_select)
         lv.addWidget(self.listbox, 1)
-        QShortcut(QKeySequence("Del"), self.listbox, activated=self.delete_soundscape)
-        QShortcut(QKeySequence.StandardKey.Copy, self.listbox, activated=self.copy_soundscape)
-        QShortcut(QKeySequence.StandardKey.Paste, self.listbox, activated=self.paste_soundscape)
-        QShortcut(QKeySequence.StandardKey.Undo, self, activated=self.undo)
-        QShortcut(QKeySequence.StandardKey.Redo, self, activated=self.redo)
+        shortcuts = (
+            (QKeySequence("Del"), self.listbox, self.delete_soundscape),
+            (QKeySequence.StandardKey.Copy, self.listbox, self.copy_soundscape),
+            (QKeySequence.StandardKey.Paste, self.listbox, self.paste_soundscape),
+            (QKeySequence.StandardKey.Undo, self, self.undo),
+            (QKeySequence.StandardKey.Redo, self, self.redo),
+        )
+        for sequence, parent, callback in shortcuts:
+            shortcut = QShortcut(sequence, parent)
+            shortcut.activated.connect(callback)
         btns = QHBoxLayout()
         add_b = QPushButton(self.t("add"))
         add_b.clicked.connect(self.add_soundscape)
@@ -2536,7 +2562,8 @@ class SoundscapeEditor(QMainWindow):
         return cb
 
     def _make_spin(self, grid, row, col_l, col_e, label, d, key,
-                   lo, hi, step=1, dec=None, pair=False, d1=0, d2=0):
+                   lo: float, hi: float, step: float = 1, dec: int | None = None,
+                   pair: bool = False, d1: float = 0, d2: float = 0):
         grid.addWidget(QLabel(label), row, col_l)
         cur = str(d.get(key, ""))
         def new_spin():
@@ -2559,7 +2586,10 @@ class SoundscapeEditor(QMainWindow):
             except Exception:
                 v = d1
             sp.blockSignals(True)
-            sp.setValue(v)
+            if isinstance(sp, QSpinBox):
+                sp.setValue(int(v))
+            else:
+                sp.setValue(float(v))
             sp.blockSignals(False)
             sp.valueChanged.connect(
                 lambda val, d=d, k=key: (d.__setitem__(k, self._fmt_num(val, dec)), self._mark_dirty()))
@@ -2802,6 +2832,9 @@ class SoundscapeEditor(QMainWindow):
             lay.addWidget(self._placeholder())
             return
         sc = self.data[self.current_sc]
+        position_tabs = QTabWidget()
+        position_tabs.setDocumentMode(True)
+        position_tabs.setMovable(False)
         for i in range(8):
             pos_key = f"position{i}"
             pos_data = sc.get(pos_key)
@@ -2810,6 +2843,8 @@ class SoundscapeEditor(QMainWindow):
             if not isinstance(pos_data, dict):
                 pos_data = {}
             sc[pos_key] = pos_data
+            page = QWidget()
+            form = QVBoxLayout(page)
             g = QGroupBox(f"Position {i}")
             grid = QGridLayout(g)
             self._make_entry(grid, 0, 0, 1, self.t("wave"), pos_data, "wave", browse=True)
@@ -2822,7 +2857,11 @@ class SoundscapeEditor(QMainWindow):
             self._make_spin(grid, 4, 0, 1, self.t("attenuation"), pos_data, "attenuation",
                             0, 10, step=0.1, dec=2, d1=1)
             grid.setColumnStretch(1, 1)
-            lay.addWidget(g)
+            form.addWidget(g)
+            form.addStretch(1)
+            position_tabs.addTab(page, str(i))
+            position_tabs.setTabToolTip(i, f"Position {i}")
+        lay.addWidget(position_tabs)
         lay.addStretch(1)
 
     def _build_global_tab(self):
